@@ -1,0 +1,13 @@
+devices:
+  - name: "wind_sensor"
+    type: "serial"
+    port: "/dev/ttyACM10"
+    baudrate: 115200
+    timeout: 0.1
+    parse:
+      prefix: ""
+      scale: 1.0
+
+logging:
+  enabled: true
+  filename: "ground_truth_log.csv"
