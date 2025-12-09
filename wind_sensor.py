@@ -90,9 +90,9 @@ class RobustWindSensor:
         self.cal_angle_gain = 0.1    # m/s per degree
         
         # Metric weights for fusion
-        self.weight_rms = 0.6
-        self.weight_freq = 0.3
-        self.weight_angle = 0.1
+        self.weight_rms = 1.0
+        self.weight_freq = 0.0
+        self.weight_angle = 0.0
         
         # Ground truth serial (input)
         self.gt_serial: Optional[serial.Serial] = None
