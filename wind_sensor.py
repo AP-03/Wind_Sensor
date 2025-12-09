@@ -359,47 +359,85 @@ class RobustWindSensor:
     
     def compute_flutter_frequency(self) -> float:
         """
-        Compute dominant flutter frequency from point history using FFT.
+        ROBUST FREQUENCY ESTIMATION
+        1. Analyzes Y-motion (vertical whipping) instead of X.
+        2. Uses Zero-Padding for high-resolution output (fixes "staircase").
+        3. Averages the spectra of ALL tracked points (noise reduction).
         """
         if len(self.point_history) == 0:
             return 0.0
         
-        # Use the point with longest history
-        longest_history = max(self.point_history, key=len)
+        # Configuration
+        MIN_HISTORY = 15      # Minimum frames to consider a point valid
+        PAD_LENGTH = 1024     # Zero-pad to this length for smooth FFT
+        FPS = self.target_fps
         
-        if len(longest_history) < 30:
+        # Accumulator for the "Average Spectrum"
+        avg_spectrum = np.zeros(PAD_LENGTH // 2)
+        count = 0
+        
+        for history in self.point_history:
+            if len(history) < MIN_HISTORY:
+                continue
+                
+            # Convert to numpy
+            pts = np.array(list(history))
+            
+            # CRITICAL CHANGE 1: Use Y-axis (Vertical) motion
+            # Flags whip UP and DOWN more reliably than they stretch Left/Right.
+            signal_data = pts[:, 1] 
+            
+            # Detrend (Center around 0)
+            signal_data = signal_data - np.mean(signal_data)
+            
+            # Windowing (Reduces spectral leakage)
+            window = np.hanning(len(signal_data))
+            windowed = signal_data * window
+            
+            # CRITICAL CHANGE 2: Zero-Padding (n=PAD_LENGTH)
+            # This interpolates the FFT, turning "0.33 Hz steps" into a smooth curve.
+            fft_vals = np.abs(np.fft.fft(windowed, n=PAD_LENGTH))
+            
+            # We only care about the first half (positive frequencies)
+            half_spectrum = fft_vals[:PAD_LENGTH // 2]
+            
+            # Accumulate
+            avg_spectrum += half_spectrum
+            count += 1
+            
+        if count == 0:
             return 0.0
+            
+        # Normalize the average
+        avg_spectrum /= count
         
-        # Extract x-positions (perpendicular to pole)
-        positions = np.array(list(longest_history))
-        x_positions = positions[:, 0]
+        # Calculate Frequency Axis
+        # The resolution is now FPS / PAD_LENGTH (e.g. 30 / 1024 = 0.029 Hz precision)
+        freqs = np.fft.fftfreq(PAD_LENGTH, d=1.0/FPS)[:PAD_LENGTH // 2]
         
-        # Detrend
-        x_detrended = x_positions - np.mean(x_positions)
+        # CRITICAL CHANGE 3: Smart Peak Finding
+        # Ignore DC offset and very low freq wobble (0.5 Hz)
+        # Ignore high frequency camera noise (> 12 Hz)
+        valid_mask = (freqs > 0.5) & (freqs < 12.0)
         
-        # Apply Hanning window
-        window = np.hanning(len(x_detrended))
-        x_windowed = x_detrended * window
-        
-        # FFT
-        fft_vals = np.abs(np.fft.fft(x_windowed))
-        freqs = np.fft.fftfreq(len(x_windowed), d=1.0/self.target_fps)
-        
-        # Find peak in positive frequencies (0.5 Hz to 15 Hz range for flutter)
-        pos_mask = (freqs > 0.5) & (freqs < 15)
-        if not np.any(pos_mask):
+        if not np.any(valid_mask):
             return 0.0
+            
+        # Extract valid range
+        valid_freqs = freqs[valid_mask]
+        valid_spectrum = avg_spectrum[valid_mask]
         
-        pos_freqs = freqs[pos_mask]
-        pos_fft = fft_vals[pos_mask]
+        # Find the dominant peak
+        peak_idx = np.argmax(valid_spectrum)
+        peak_freq = valid_freqs[peak_idx]
+        peak_val = valid_spectrum[peak_idx]
         
-        peak_idx = np.argmax(pos_fft)
-        peak_freq = pos_freqs[peak_idx]
-        
-        # Only return if peak is significant
-        if pos_fft[peak_idx] > np.mean(pos_fft) * 2:
-            return float(peak_freq)
-        return 0.0
+        # Noise Gate: The peak must be distinct
+        mean_noise = np.mean(valid_spectrum)
+        if peak_val < mean_noise * 3.0:  # Signal must be 3x stronger than background
+            return 0.0
+            
+        return float(peak_freq)
     
     def compute_extension_angle(self, points: np.ndarray) -> float:
         """
