@@ -197,20 +197,12 @@ class RobustWindSensor:
             self.uart_out = None
     
     def send_uart(self, metrics: WindMetrics):
-        """Send metrics over UART to MacBook"""
+        """Send wind estimate over UART to MacBook"""
         if self.uart_out is None:
             return
         
-        # Format: timestamp,rms_displacement,flutter_freq_hz,extension_angle,wind_estimate,num_points,quality
-        msg = (
-            f"{time.time():.3f},"
-            f"{metrics.rms_displacement:.4f},"
-            f"{metrics.flutter_freq_hz:.3f},"
-            f"{metrics.extension_angle_deg:.2f},"
-            f"{metrics.estimated_wind_mps:.3f},"
-            f"{metrics.num_tracked_points:d},"
-            f"{metrics.quality:.2f}\n"
-        )
+        # Only send wind speed estimation (matches CameraTest.py format)
+        msg = f"{metrics.estimated_wind_mps:.3f}\r\n"
         
         try:
             self.uart_out.write(msg.encode())
