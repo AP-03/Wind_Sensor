@@ -84,7 +84,7 @@ class RobustWindSensor:
         self.displacement_history = deque(maxlen=30)
         
         # Calibration parameters (to be fitted from wind tunnel data)
-        self.cal_rms_gain = 0.5      # m/s per pixel RMS
+        self.cal_rms_gain = 1.2      # m/s per pixel RMS (calibrated 2024-12-09)
         self.cal_rms_offset = 0.0
         self.cal_freq_gain = 2.0     # m/s per Hz
         self.cal_angle_gain = 0.1    # m/s per degree
@@ -93,6 +93,13 @@ class RobustWindSensor:
         self.weight_rms = 1.0
         self.weight_freq = 0.0
         self.weight_angle = 0.0
+        
+        # Robust output filter state
+        self.filtered_wind = 0.0           # Current filtered output
+        self.running_avg = 0.0             # Slow-moving average for outlier detection
+        self.filter_alpha = 0.2            # EMA smoothing factor
+        self.filter_max_rate = 0.3         # Max change per frame (m/s)
+        self.filter_outlier_thresh = 1.5   # Outlier detection threshold (m/s)
         
         # Ground truth serial (input)
         self.gt_serial: Optional[serial.Serial] = None
@@ -456,6 +463,35 @@ class RobustWindSensor:
         angle = np.degrees(np.arctan2(dy, abs(dx)))
         return float(angle)
     
+    def apply_robust_filter(self, raw_value: float) -> float:
+        """
+        Robust output filter combining:
+        1. Outlier rejection - ignore sudden jumps
+        2. Rate limiting - clamp max change per frame
+        3. EMA smoothing - smooth the output
+        
+        This handles tracking glitches (occlusion, lost points) gracefully.
+        """
+        # Step 1: Outlier rejection
+        # If new value jumps too far from running average, use previous output
+        if abs(raw_value - self.running_avg) > self.filter_outlier_thresh:
+            filtered_input = self.filtered_wind  # Reject, use previous
+        else:
+            filtered_input = raw_value  # Accept
+        
+        # Step 2: EMA smoothing
+        target = self.filter_alpha * filtered_input + (1 - self.filter_alpha) * self.filtered_wind
+        
+        # Step 3: Rate limiting
+        delta = target - self.filtered_wind
+        delta = max(-self.filter_max_rate, min(self.filter_max_rate, delta))
+        self.filtered_wind = self.filtered_wind + delta
+        
+        # Update running average for outlier detection (slow update)
+        self.running_avg = 0.05 * raw_value + 0.95 * self.running_avg
+        
+        return self.filtered_wind
+    
     def compute_metrics(self, points: np.ndarray, displacements: np.ndarray) -> WindMetrics:
         """
         Compute all wind metrics from tracking data.
@@ -484,16 +520,19 @@ class RobustWindSensor:
         # Extension angle
         metrics.extension_angle_deg = self.compute_extension_angle(points)
         
-        # Fused wind estimate
+        # Fused wind estimate (raw)
         v_rms = self.cal_rms_gain * metrics.rms_displacement + self.cal_rms_offset
         v_freq = self.cal_freq_gain * metrics.flutter_freq_hz
         v_angle = self.cal_angle_gain * abs(metrics.extension_angle_deg)
         
-        metrics.estimated_wind_mps = max(0, (
+        raw_wind = max(0, (
             self.weight_rms * v_rms +
             self.weight_freq * v_freq +
             self.weight_angle * v_angle
         ))
+        
+        # Apply robust filter (outlier rejection + rate limiting + EMA)
+        metrics.estimated_wind_mps = self.apply_robust_filter(raw_wind)
         
         return metrics
     
