@@ -25,6 +25,66 @@ from dataclasses import dataclass
 from typing import Optional, Tuple, List
 
 
+def kalman_filter_1d(measurements, process_variance=1e-5, measurement_variance=0.01):
+    """Simple 1D Kalman filter for smoothing wind speed estimates"""
+    n = len(measurements)
+    filtered = np.zeros(n)
+    
+    # Initial state
+    x = measurements[0] if not np.isnan(measurements[0]) else 0.0  # state estimate
+    P = 1.0  # estimation error covariance
+    
+    for i in range(n):
+        if np.isnan(measurements[i]):
+            filtered[i] = x
+            continue
+            
+        # Prediction
+        x_pred = x
+        P_pred = P + process_variance
+        
+        # Update
+        K = P_pred / (P_pred + measurement_variance)  # Kalman gain
+        x = x_pred + K * (measurements[i] - x_pred)
+        P = (1 - K) * P_pred
+        
+        filtered[i] = x
+    
+    return filtered
+
+
+def fit_cubic_model(rms_value, coeffs):
+    """
+    Apply cubic polynomial model: wind_speed = a*rms³ + b*rms² + c*rms + d
+    
+    Args:
+        rms_value: RMS displacement value
+        coeffs: Tuple of (a, b, c, d) coefficients
+    
+    Returns:
+        Estimated wind speed in m/s
+    """
+    a, b, c, d = coeffs
+    return a * rms_value**3 + b * rms_value**2 + c * rms_value + d
+
+
+def fit_logarithmic_model(rms_value, coeffs):
+    """
+    Apply logarithmic model: wind_speed = a*ln(rms) + b
+    
+    Args:
+        rms_value: RMS displacement value (must be > 0)
+        coeffs: Tuple of (a, b) coefficients
+    
+    Returns:
+        Estimated wind speed in m/s
+    """
+    a, b = coeffs
+    if rms_value <= 0:
+        return 0.0
+    return a * np.log(rms_value) + b
+
+
 @dataclass
 class WindMetrics:
     """Container for computed wind metrics"""
@@ -83,23 +143,46 @@ class RobustWindSensor:
         # Displacement history for RMS calculation
         self.displacement_history = deque(maxlen=30)
         
-        # Calibration parameters (to be fitted from wind tunnel data)
-        self.cal_rms_gain = 1.2      # m/s per pixel RMS (calibrated 2024-12-09)
+        # ============================================================
+        # METHOD SELECTION - Change this to switch algorithms
+        # ============================================================
+        # Options:
+        #   'cubic_kalman'   - Cubic polynomial + Kalman filter (R²=0.8814)
+        #   'log_kalman'     - Logarithmic model + Kalman filter (R²=0.8306)
+        #   'robust_filter'  - Legacy linear model + robust filtering
+        # ============================================================
+        self.method = 'cubic_kalman'  # <-- CHANGE THIS TO SWITCH METHODS
+        # ============================================================
+        
+        # Cubic model coefficients: wind_speed = a*rms³ + b*rms² + c*rms + d
+        # From calibration with R² = 0.8052 (raw), 0.8814 (Kalman filtered)
+        self.cubic_coeffs = (0.0186, -0.5154, 3.9319, -0.4072)
+        
+        # Logarithmic model coefficients: wind_speed = a*ln(rms) + b
+        # From calibration with R² = 0.7202 (raw), 0.8306 (Kalman filtered)
+        self.log_coeffs = (2.3969, 3.9180)
+        
+        # Kalman filter parameters (for cubic_kalman and log_kalman methods)
+        self.kalman_process_var = 6e-5      # Lower = smoother but slower response
+        self.kalman_measurement_var = 0.05  # Lower = trust measurements more (less smooth)
+        self.kalman_state = 0.0
+        self.kalman_covariance = 1.0
+        
+        # Legacy linear calibration (for robust_filter method)
+        self.cal_rms_gain = 1.2      # m/s per pixel RMS
         self.cal_rms_offset = 0.0
         self.cal_freq_gain = 2.0     # m/s per Hz
         self.cal_angle_gain = 0.1    # m/s per degree
-        
-        # Metric weights for fusion
         self.weight_rms = 1.0
         self.weight_freq = 0.0
         self.weight_angle = 0.0
         
-        # Robust output filter state
+        # Robust filter state (for robust_filter method)
         self.filtered_wind = 0.0           # Current filtered output
         self.running_avg = 0.0             # Slow-moving average for outlier detection
-        self.filter_alpha = 0.2            # EMA smoothing factor
-        self.filter_max_rate = 0.3         # Max change per frame (m/s)
-        self.filter_outlier_thresh = 1.5   # Outlier detection threshold (m/s)
+        self.filter_alpha = 0.2            # EMA smoothing: Higher = faster response (0.1-0.3)
+        self.filter_max_rate = 0.3         # Max m/s change per frame: Higher = faster jumps allowed
+        self.filter_outlier_thresh = 1.5   # Outlier rejection: Higher = accept larger jumps (m/s)
         
         # Ground truth serial (input)
         self.gt_serial: Optional[serial.Serial] = None
@@ -520,19 +603,49 @@ class RobustWindSensor:
         # Extension angle
         metrics.extension_angle_deg = self.compute_extension_angle(points)
         
-        # Fused wind estimate (raw)
-        v_rms = self.cal_rms_gain * metrics.rms_displacement + self.cal_rms_offset
-        v_freq = self.cal_freq_gain * metrics.flutter_freq_hz
-        v_angle = self.cal_angle_gain * abs(metrics.extension_angle_deg)
-        
-        raw_wind = max(0, (
-            self.weight_rms * v_rms +
-            self.weight_freq * v_freq +
-            self.weight_angle * v_angle
-        ))
-        
-        # Apply robust filter (outlier rejection + rate limiting + EMA)
-        metrics.estimated_wind_mps = self.apply_robust_filter(raw_wind)
+        # Wind speed estimation based on selected method
+        if self.method == 'cubic_kalman':
+            # Method 1: Cubic polynomial + Kalman filter
+            raw_estimate = fit_cubic_model(metrics.rms_displacement, self.cubic_coeffs)
+            
+            # Apply Kalman filter
+            x_pred = self.kalman_state
+            P_pred = self.kalman_covariance + self.kalman_process_var
+            K = P_pred / (P_pred + self.kalman_measurement_var)
+            self.kalman_state = x_pred + K * (raw_estimate - x_pred)
+            self.kalman_covariance = (1 - K) * P_pred
+            
+            metrics.estimated_wind_mps = max(0, self.kalman_state)
+            
+        elif self.method == 'log_kalman':
+            # Method 2: Logarithmic model + Kalman filter
+            raw_estimate = fit_logarithmic_model(metrics.rms_displacement, self.log_coeffs)
+            
+            # Apply Kalman filter
+            x_pred = self.kalman_state
+            P_pred = self.kalman_covariance + self.kalman_process_var
+            K = P_pred / (P_pred + self.kalman_measurement_var)
+            self.kalman_state = x_pred + K * (raw_estimate - x_pred)
+            self.kalman_covariance = (1 - K) * P_pred
+            
+            metrics.estimated_wind_mps = max(0, self.kalman_state)
+            
+        elif self.method == 'robust_filter':
+            # Method 3: Legacy linear fusion + robust filter
+            v_rms = self.cal_rms_gain * metrics.rms_displacement + self.cal_rms_offset
+            v_freq = self.cal_freq_gain * metrics.flutter_freq_hz
+            v_angle = self.cal_angle_gain * abs(metrics.extension_angle_deg)
+            
+            raw_wind = max(0, (
+                self.weight_rms * v_rms +
+                self.weight_freq * v_freq +
+                self.weight_angle * v_angle
+            ))
+            
+            metrics.estimated_wind_mps = self.apply_robust_filter(raw_wind)
+            
+        else:
+            raise ValueError(f"Unknown method: {self.method}. Use 'cubic_kalman', 'log_kalman', or 'robust_filter'")
         
         return metrics
     
@@ -605,6 +718,14 @@ class RobustWindSensor:
         """Main sensor loop"""
         print("\n" + "="*50)
         print("ROBUST WIND SENSOR")
+        print("="*50)
+        print(f"Method: {self.method}")
+        if self.method == 'cubic_kalman':
+            print("  Using: Cubic polynomial + Kalman filter (R²=0.8814)")
+        elif self.method == 'log_kalman':
+            print("  Using: Logarithmic model + Kalman filter (R²=0.8306)")
+        elif self.method == 'robust_filter':
+            print("  Using: Linear fusion + Robust filter")
         print("="*50)
         print("Controls:")
         print("  'r' - Reset ROI selection")
