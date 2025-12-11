@@ -151,7 +151,7 @@ class RobustWindSensor:
         #   'log_kalman'     - Logarithmic model + Kalman filter (R²=0.8306)
         #   'robust_filter'  - Legacy linear model + robust filtering
         # ============================================================
-        self.method = 'log_kalman'  # <-- CHANGE THIS TO SWITCH METHODS
+        self.method = 'robust_filter'  # <-- CHANGE THIS TO SWITCH METHODS
         # ============================================================
         
         # Cubic model coefficients: wind_speed = a*rms³ + b*rms² + c*rms + d
