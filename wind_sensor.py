@@ -180,9 +180,9 @@ class RobustWindSensor:
         # Robust filter state (for robust_filter method)
         self.filtered_wind = 0.0           # Current filtered output
         self.running_avg = 0.0             # Slow-moving average for outlier detection
-        self.filter_alpha = 0.2            # EMA smoothing: Higher = faster response (0.1-0.3)
-        self.filter_max_rate = 0.3         # Max m/s change per frame: Higher = faster jumps allowed
-        self.filter_outlier_thresh = 1.5   # Outlier rejection: Higher = accept larger jumps (m/s)
+        self.filter_alpha = 0.1            # EMA smoothing: Higher = faster response (0.1-0.3)
+        self.filter_max_rate = 0.15         # Max m/s change per frame: Higher = faster jumps allowed
+        self.filter_outlier_thresh = 1.2   # Outlier rejection: Higher = accept larger jumps (m/s)
         
         # Ground truth serial (input)
         self.gt_serial: Optional[serial.Serial] = None
